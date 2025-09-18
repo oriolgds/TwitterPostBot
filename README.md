@@ -67,7 +67,7 @@ create table twitter_posts (
 
 ***
 
-## 2. Políticas RLS
+## 2. Políticas RLS (Opcional)
 
 1. En **Database → Policies**, **habilita RLS** para cada tabla.
 2. Crea estas políticas, reemplazando `<service_role>` por el role interno de Supabase:
@@ -150,5 +150,4 @@ Cada ejecución:
 - **Límites alcanzados**: consulta `api_usage`, espera al siguiente mes o ajusta consumo.
 - **Acceso bloqueado por RLS**: confirma que la función use el role definido.
 
-Con estos pasos tu amigo podrá desplegar y programar todo directamente desde la interfaz web de Supabase sin usar la CLI. ¡Éxito!
 
