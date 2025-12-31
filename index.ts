@@ -228,7 +228,7 @@ async function getPerplexityNews(query, type) {
           {
             role: 'system',
             content: `Eres un periodista experto. Proporciona exactamente 2 ${query} en formato JSON con esta estructura:
-[{"title": "título", "description": "resumen breve", "url": "url si disponible", "image_url": "url de imagen relevante si disponible", "published_date": "fecha si disponible"}]
+[{"title": "título", "description": "resumen breve sin citas ni fuentes", "url": "url si disponible", "image_url": "url de imagen relevante si disponible", "published_date": "fecha si disponible"}]
 
 Solo responde con el JSON válido, sin explicaciones adicionales.`
           },
@@ -311,6 +311,7 @@ Reglas:
 - Entra en detalle y explica el contexto.
 - Cada tweet máximo 280 caracteres.
 - NO uses formato Markdown (nada de negritas **text**, ni cursivas *text*). Usa solo texto plano.
+- NO incluyas citas, referencias ni números de fuentes entre corchetes (ej: [1], [2]).
 - El primer tweet debe ser un titular atractivo + introducción.
 - El último tweet una conclusión o pregunta para la audiencia.
 - Usa emojis pero no abuses.
