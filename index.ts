@@ -55,6 +55,43 @@ async function generateOAuthHeader(method, url, consumerKey, consumerSecret, acc
   const authHeader = 'OAuth ' + Object.keys(oauthParams).map((key)=>`${percentEncode(key)}="${percentEncode(oauthParams[key])}"`).join(', ');
   return authHeader;
 }
+async function uploadMedia(imageUrl, consumerKey, consumerSecret, accessToken, accessTokenSecret) {
+  try {
+    // 1. Fetch the image
+    const imageRes = await fetch(imageUrl);
+    if (!imageRes.ok) throw new Error(`Failed to fetch image: ${imageRes.statusText}`);
+    const imageBlob = await imageRes.blob();
+
+    // 2. Upload to Twitter
+    const uploadUrl = 'https://upload.twitter.com/1.1/media/upload.json';
+    const formData = new FormData();
+    formData.append('media', imageBlob);
+
+    // OAuth 1.0a for upload
+    // Note: for multipart/form-data, body parameters are NOT included in the signature
+    const authHeader = await generateOAuthHeader('POST', uploadUrl, consumerKey, consumerSecret, accessToken, accessTokenSecret);
+
+    const uploadRes = await fetch(uploadUrl, {
+      method: 'POST',
+      headers: {
+        'Authorization': authHeader,
+        // Do NOT set Content-Type, fetch sets it with boundary
+      },
+      body: formData
+    });
+
+    if (!uploadRes.ok) {
+        const errText = await uploadRes.text();
+        throw new Error(`Media upload failed: ${uploadRes.status} ${errText}`);
+    }
+
+    const uploadData = await uploadRes.json();
+    return uploadData.media_id_string;
+  } catch (e) {
+    console.error('Error uploading media:', e);
+    return null;
+  }
+}
 serve(async (req)=>{
   // Manejar CORS
   if (req.method === 'OPTIONS') {
@@ -108,20 +145,46 @@ serve(async (req)=>{
         }
       });
     }
-    // Generar hilo de Twitter con Perplexity
-    const twitterThread = await generateTwitterThread(newNews);
+    // Obtener credenciales para uploadMedia
+    const consumerKey = Deno.env.get('TWITTER_API_KEY');
+    const consumerSecret = Deno.env.get('TWITTER_API_SECRET');
+    const accessToken = Deno.env.get('TWITTER_ACCESS_TOKEN');
+    const accessTokenSecret = Deno.env.get('TWITTER_ACCESS_TOKEN_SECRET');
+
+    // Procesar cada noticia individualmente
+    const results = [];
+    for (const newsItem of newNews) {
+      // Verificar límites antes de procesar cada noticia
+      if (!await checkApiLimits(supabase)) {
+        console.log('Límite de API alcanzado durante el procesamiento');
+        break;
+      }
+
+      // Generar hilo específico para esta noticia
+      const tweets = await generateThreadForNews(newsItem);
+
+      // Subir imagen si existe
+      let mediaId = null;
+      if (newsItem.image_url && consumerKey && consumerSecret && accessToken && accessTokenSecret) {
+        mediaId = await uploadMedia(newsItem.image_url, consumerKey, consumerSecret, accessToken, accessTokenSecret);
+      }
+
+      // Publicar hilo
+      const result = await publishTwitterThread(supabase, tweets, mediaId);
+      results.push(result);
+
+      // Actualizar contadores
+      await updateApiUsage(supabase, 'perplexity', 1);
+      await updateApiUsage(supabase, 'twitter', tweets.length);
+    }
+
     // Guardar noticias en cache
     await saveNewsToCache(supabase, newNews);
-    // Publicar hilo en Twitter usando OAuth 1.0a
-    const threadResult = await publishTwitterThread(supabase, twitterThread);
-    // Actualizar contadores de API
-    await updateApiUsage(supabase, 'perplexity', 2); // 2 llamadas a Perplexity
-    await updateApiUsage(supabase, 'twitter', twitterThread.length);
+
     return new Response(JSON.stringify({
-      message: 'Hilo publicado exitosamente',
-      thread_id: threadResult.thread_id,
-      posts_published: threadResult.posts_published,
-      news_count: newNews.length
+      message: 'Noticias procesadas',
+      published_count: results.length,
+      details: results
     }), {
       status: 200,
       headers: {
@@ -164,14 +227,14 @@ async function getPerplexityNews(query, type) {
         messages: [
           {
             role: 'system',
-            content: `Eres un periodista experto. Proporciona exactamente 5 ${query} en formato JSON con esta estructura:
-[{"title": "título", "description": "resumen breve", "url": "url si disponible", "published_date": "fecha si disponible"}]
+            content: `Eres un periodista experto. Proporciona exactamente 2 ${query} en formato JSON con esta estructura:
+[{"title": "título", "description": "resumen breve", "url": "url si disponible", "image_url": "url de imagen relevante si disponible", "published_date": "fecha si disponible"}]
 
 Solo responde con el JSON válido, sin explicaciones adicionales.`
           },
           {
             role: 'user',
-            content: `Dame las 5 ${query}`
+            content: `Dame las 2 ${query}`
           }
         ],
         temperature: 0.3,
@@ -228,9 +291,9 @@ async function saveNewsToCache(supabase, news) {
     });
   }
 }
-async function generateTwitterThread(news) {
+async function generateThreadForNews(newsItem) {
   try {
-    const newsText = news.map((item, index)=>`${index + 1}. ${item.title}\n${item.description}`).join('\n\n');
+    const newsText = `Título: ${newsItem.title}\nDescripción: ${newsItem.description}\nFuente: ${newsItem.url || 'No disponible'}`;
     const response = await fetch('https://api.perplexity.ai/chat/completions', {
       method: 'POST',
       headers: {
@@ -242,24 +305,24 @@ async function generateTwitterThread(news) {
         messages: [
           {
             role: 'system',
-            content: `Crea un hilo de Twitter de exactamente 10 tweets sobre las noticias proporcionadas.
+            content: `Crea un hilo de Twitter de 4 a 6 tweets sobre la noticia proporcionada.
 
 Reglas:
-- Cada tweet debe tener máximo 280 caracteres
-- El primer tweet debe ser una introducción atractiva
-- Los tweets 2-9 deben cubrir las noticias más importantes
-- El último tweet debe ser una conclusión
-- Usa emojis relevantes
-- Tono profesional pero cercano
-- Responde solo con los 10 tweets separados por "---"`
+- Entra en detalle y explica el contexto.
+- Cada tweet máximo 280 caracteres.
+- NO uses formato Markdown (nada de negritas **text**, ni cursivas *text*). Usa solo texto plano.
+- El primer tweet debe ser un titular atractivo + introducción.
+- El último tweet una conclusión o pregunta para la audiencia.
+- Usa emojis pero no abuses.
+- Responde solo con los tweets separados por "---"`
           },
           {
             role: 'user',
-            content: `Crea un hilo de Twitter con estas noticias:\n\n${newsText}`
+            content: `Noticia:\n${newsText}`
           }
         ],
         temperature: 0.7,
-        max_tokens: 2000
+        max_tokens: 1000
       })
     });
     if (!response.ok) {
@@ -269,14 +332,13 @@ Reglas:
     const content = data.choices[0].message.content;
     // Dividir el contenido en tweets individuales
     const tweets = content.split('---').map((tweet)=>tweet.trim()).filter((tweet)=>tweet.length > 0);
-    // Asegurar que tenemos exactamente 10 tweets
-    return tweets.slice(0, 10);
+    return tweets;
   } catch (error) {
     console.error('Error generando hilo de Twitter:', error);
     throw error;
   }
 }
-async function publishTwitterThread(supabase, tweets) {
+async function publishTwitterThread(supabase, tweets, mediaId = null) {
   // Obtener credenciales OAuth de los secrets
   const consumerKey = Deno.env.get('TWITTER_API_KEY');
   const consumerSecret = Deno.env.get('TWITTER_API_SECRET');
@@ -299,9 +361,15 @@ async function publishTwitterThread(supabase, tweets) {
   // Publicar tweets uno por uno usando OAuth 1.0a
   for(let i = 0; i < tweets.length; i++){
     try {
-      const tweetData = {
+      const tweetData: any = {
         text: tweets[i]
       };
+
+      // Si es el primer tweet y tenemos mediaId, adjuntarlo
+      if (i === 0 && mediaId) {
+        tweetData.media = { media_ids: [mediaId] };
+      }
+
       // Si no es el primer tweet, añadir reply_to_tweet_id
       if (lastTweetId) {
         tweetData.reply = {
